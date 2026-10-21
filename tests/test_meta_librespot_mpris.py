@@ -148,14 +148,14 @@ def start_control(env: dict) -> subprocess.Popen:
     return subprocess.Popen(args, env=env, stdin=pipe, stdout=pipe, stderr=pipe, text=True)
 
 
-def test_mpris_end_to_end(tmp_path, bus_address):
-    env = {"PATH": os.environ["PATH"], "XDG_RUNTIME_DIR": str(tmp_path), "DBUS_SESSION_BUS_ADDRESS": bus_address}
+def test_mpris_end_to_end(runtime_dir, bus_address):
+    env = {"PATH": os.environ["PATH"], "XDG_RUNTIME_DIR": str(runtime_dir), "DBUS_SESSION_BUS_ADDRESS": bus_address}
     ctrl = start_control(env)
     try:
         assert json.loads(ctrl.stdout.readline())["method"] == "Plugin.Stream.Ready"
-        assert run_hook(tmp_path, {"PLAYER_EVENT": "preloading", "TRACK_ID": "next"}).returncode == 0
-        assert run_hook(tmp_path, TRACK_EVENT).returncode == 0
-        assert run_hook(tmp_path, {"PLAYER_EVENT": "playing", "POSITION_MS": "42000"}).returncode == 0
+        assert run_hook(runtime_dir, {"PLAYER_EVENT": "preloading", "TRACK_ID": "next"}).returncode == 0
+        assert run_hook(runtime_dir, TRACK_EVENT).returncode == 0
+        assert run_hook(runtime_dir, {"PLAYER_EVENT": "playing", "POSITION_MS": "42000"}).returncode == 0
         # Both notifications to snapserver are out, so MPRIS is in sync too.
         ctrl.stdout.readline()
         ctrl.stdout.readline()
@@ -186,13 +186,13 @@ def test_mpris_end_to_end(tmp_path, bus_address):
         ctrl.wait()
 
 
-def test_mpris_name_already_owned_fails_before_ready(tmp_path, bus_address):
-    env = {"PATH": os.environ["PATH"], "XDG_RUNTIME_DIR": str(tmp_path), "DBUS_SESSION_BUS_ADDRESS": bus_address}
+def test_mpris_name_already_owned_fails_before_ready(runtime_dir, bus_address):
+    env = {"PATH": os.environ["PATH"], "XDG_RUNTIME_DIR": str(runtime_dir), "DBUS_SESSION_BUS_ADDRESS": bus_address}
     first = start_control(env)
     try:
         assert json.loads(first.stdout.readline())["method"] == "Plugin.Stream.Ready"
-        second_env = {**env, "XDG_RUNTIME_DIR": str(tmp_path / "second")}
-        (tmp_path / "second").mkdir()
+        second_env = {**env, "XDG_RUNTIME_DIR": str(runtime_dir / "second")}
+        (runtime_dir / "second").mkdir()
         second = start_control(second_env)
         out, err = second.communicate(timeout=10)
         assert second.returncode != 0
@@ -203,8 +203,8 @@ def test_mpris_name_already_owned_fails_before_ready(tmp_path, bus_address):
         first.wait()
 
 
-def test_mpris_without_session_bus_fails_before_ready(tmp_path):
-    env = {"PATH": os.environ["PATH"], "XDG_RUNTIME_DIR": str(tmp_path)}
+def test_mpris_without_session_bus_fails_before_ready(runtime_dir):
+    env = {"PATH": os.environ["PATH"], "XDG_RUNTIME_DIR": str(runtime_dir)}
     ctrl = start_control(env)
     out, err = ctrl.communicate(timeout=10)
     assert ctrl.returncode != 0

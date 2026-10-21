@@ -20,6 +20,10 @@
 One file, two roles, told apart by PLAYER_EVENT in the environment:
 - hook: run by librespot once per player event; forwards it over a Unix socket.
 - control script: run by snapserver; turns those events into stream properties.
+
+Each stream gets its own socket, named after the snapcast stream id: snapserver
+passes it to the control script as --stream, and the hook takes it as its only
+argument (--onevent "/path/to/meta_librespot.py <stream id>").
 """
 
 from __future__ import annotations
@@ -30,12 +34,13 @@ import contextlib
 import copy
 import json
 import os
+import re
 import socket
 import sys
 import tempfile
 import time
 
-SOCKET_NAME = "snapcast-meta-librespot.sock"
+SOCKET_PREFIX = "snapcast-meta-librespot-"
 MAX_DATAGRAM = 65536
 LIBRESPOT_MAX_VOLUME = 65535
 
@@ -61,17 +66,29 @@ EVENT_VARS = (
 )
 
 
-def socket_path() -> str:
-    """Rendezvous for both roles: they share snapserver's environment."""
-    return os.path.join(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir(), SOCKET_NAME)
+def socket_path(stream: str) -> str:
+    """Rendezvous for both roles of one stream: they share snapserver's
+    environment, and the stream id keeps several streams apart."""
+    # Stream ids are free text ("Air Play", "a/b"); keep the file name plain.
+    name = SOCKET_PREFIX + re.sub(r"[^A-Za-z0-9._-]", "_", stream) + ".sock"
+    return os.path.join(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir(), name)
 
 
 # --- Hook role (run by librespot) --------------------------------------
-def run_hook() -> int:
+def run_hook(argv: list[str]) -> int:
     event = {k: os.environ[k] for k in EVENT_VARS if k in os.environ}
+    if len(argv) != 1:
+        # Without the stream id the event has nowhere to go; say so in
+        # librespot's log rather than dropping it.
+        print(
+            f"meta_librespot: event {event['PLAYER_EVENT']} not delivered: the hook needs the snapcast stream id"
+            ' as its only argument, e.g. --onevent "/path/to/meta_librespot.py <stream id>"',
+            file=sys.stderr,
+        )
+        return 2
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
-            s.sendto(json.dumps(event).encode(), socket_path())
+            s.sendto(json.dumps(event).encode(), socket_path(argv[0]))
     except OSError as e:
         print(f"meta_librespot: event {event['PLAYER_EVENT']} not delivered: {e}", file=sys.stderr)
         return 1
@@ -198,8 +215,8 @@ def handle_request(player: Player, line: bytes) -> None:
         send({"jsonrpc": "2.0", "id": req_id, "error": error})
 
 
-async def run_control(mpris: bool) -> int:
-    path = socket_path()
+async def run_control(stream: str, mpris: bool) -> int:
+    path = socket_path(stream)
     # A previous instance killed by snapserver leaves its socket file behind.
     with contextlib.suppress(FileNotFoundError):
         os.unlink(path)
@@ -249,8 +266,8 @@ async def run_control(mpris: bool) -> int:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    # snapserver appends these to every control script; none is needed here.
-    parser.add_argument("--stream", help="snapcast stream id (passed by snapserver, unused)")
+    # snapserver appends these to every control script; only --stream is used.
+    parser.add_argument("--stream", required=True, help="snapcast stream id (passed by snapserver), names the socket")
     parser.add_argument("--snapcast-host", help="snapserver HTTP host (passed by snapserver, unused)")
     parser.add_argument("--snapcast-port", help="snapserver HTTP port (passed by snapserver, unused)")
     parser.add_argument("--mpris", action="store_true", help="also publish a read-only MPRIS player on the session bus")
@@ -259,9 +276,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main() -> int:
     if "PLAYER_EVENT" in os.environ:
-        return run_hook()
+        return run_hook(sys.argv[1:])
     args = parse_args(sys.argv[1:])
-    return asyncio.run(run_control(args.mpris))
+    return asyncio.run(run_control(args.stream, args.mpris))
 
 
 if __name__ == "__main__":

@@ -24,9 +24,14 @@ environment variable:
 - **control script**: snapserver runs it (`controlscript=`). It listens on the
   socket and publishes stream properties to snapserver on stdout.
 
-The socket is `$XDG_RUNTIME_DIR/snapcast-meta-librespot.sock`, or the system
-temporary directory when `XDG_RUNTIME_DIR` is unset. Both roles are started
-under snapserver, so they resolve the same path.
+Each stream has its own socket,
+`$XDG_RUNTIME_DIR/snapcast-meta-librespot-<stream id>.sock` (in the system
+temporary directory when `XDG_RUNTIME_DIR` is unset), so one snapserver can run
+several librespot streams. Characters other than letters, digits, `.`, `_` and
+`-` in the stream id become `_`. The control script takes the stream id from
+the `--stream` argument snapserver always passes; the hook takes it as its only
+argument (see Installation). Both roles are started under snapserver, so they
+resolve the same path.
 
 ## Requirements
 
@@ -48,12 +53,19 @@ Declare the stream as a `process://` source. The `librespot://` source type
 must not be used: its log parser would keep overwriting the metadata.
 
 ```ini
-source = process:///usr/bin/librespot?name=Spotify&sampleformat=44100:16:2&wd_timeout=7800&params=--name%20Snapcast%20--bitrate%20320%20--backend%20pipe%20--initial-volume%20100%20--verbose%20--onevent%20/usr/share/snapserver/plug-ins/meta_librespot.py&controlscript=meta_librespot.py
+source = process:///usr/bin/librespot?name=Spotify&sampleformat=44100:16:2&wd_timeout=7800&params=--name%20Snapcast%20--bitrate%20320%20--backend%20pipe%20--initial-volume%20100%20--verbose%20--onevent%20%22/usr/share/snapserver/plug-ins/meta_librespot.py%20Spotify%22&controlscript=meta_librespot.py
 ```
 
-- `params` holds the librespot command line, URL-encoded (`%20` for a space).
-  `--backend pipe` is required; `--onevent` takes the absolute path of the
-  script.
+- `params` holds the librespot command line, URL-encoded (`%20` for a space,
+  `%22` for a double quote). `--backend pipe` is required.
+- `--onevent` takes the absolute path of the script followed by the stream id,
+  in double quotes so that snapserver hands both to librespot as one argument;
+  librespot splits it again when it runs the hook. The id must match the
+  source's `name=` exactly (`Spotify` above), or the stream gets no metadata.
+  A hook run without an id says so in librespot's log and exits with status 2.
+  The script path must not contain spaces.
+- For more streams, repeat the line with another `name=`, librespot `--name`
+  and `--zeroconf-port` (if set), and the matching id after the script path.
 - `wd_timeout=7800` and `--verbose` reproduce the `librespot://` behaviour
   (restart librespot after 130 minutes without log output). Both are optional.
 - Add `log_stderr=true` to get librespot's log lines in snapserver's log.
@@ -73,8 +85,9 @@ script also publishes a read-only MPRIS player on the session bus, as
 
 ## Limitations
 
-- One librespot stream per snapserver: the socket path is fixed, so a second
-  stream using this script would take over the first one's events.
+- `--mpris` works for one stream per session bus: the bus name
+  `org.mpris.MediaPlayer2.librespot` is fixed, so a second stream with
+  `--mpris` exits at startup.
 - Read-only: librespot has no control API, so play, pause, next and previous
   are not available (`canControl` is false).
 - Metadata still leads the audio by snapserver's stream buffer (1 second by

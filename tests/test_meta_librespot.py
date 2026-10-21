@@ -171,23 +171,41 @@ def test_control_request_is_refused(capsys):
     assert msg["error"]["code"] == -32601
 
 
+# --- socket_path -------------------------------------------------------
+def test_socket_path_is_per_stream(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    assert meta_librespot.socket_path("Spotify-HTPC") == str(tmp_path / "snapcast-meta-librespot-Spotify-HTPC.sock")
+    assert meta_librespot.socket_path("Spotify-HTPC") != meta_librespot.socket_path("Spotify-Kitchen")
+
+
+def test_socket_path_keeps_the_file_name_plain(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    assert Path(meta_librespot.socket_path("Air Play/2")).name == "snapcast-meta-librespot-Air_Play_2.sock"
+
+
 # --- both roles, as real processes -------------------------------------
-def run_hook(runtime_dir: Path, event: dict) -> subprocess.CompletedProcess:
+def run_hook(runtime_dir: Path, event: dict, *args: str) -> subprocess.CompletedProcess:
+    """Run the hook as librespot would; the stream id defaults to SpotifyHD."""
     env = {"PATH": os.environ["PATH"], "XDG_RUNTIME_DIR": str(runtime_dir), **event}
-    return subprocess.run([sys.executable, str(SCRIPT)], env=env, capture_output=True, text=True, timeout=10)
+    argv = [sys.executable, str(SCRIPT), *(args or ("SpotifyHD",))]
+    return subprocess.run(argv, env=env, capture_output=True, text=True, timeout=10)
 
 
-def test_hook_to_control_script_end_to_end(tmp_path):
-    env = {"PATH": os.environ["PATH"], "XDG_RUNTIME_DIR": str(tmp_path)}
-    args = [sys.executable, str(SCRIPT), "--stream=SpotifyHD", "--snapcast-port=1780", "--snapcast-host=localhost"]
-    ctrl = subprocess.Popen(args, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+def start_control(runtime_dir: Path, stream: str = "SpotifyHD") -> subprocess.Popen:
+    env = {"PATH": os.environ["PATH"], "XDG_RUNTIME_DIR": str(runtime_dir)}
+    args = [sys.executable, str(SCRIPT), f"--stream={stream}", "--snapcast-port=1780", "--snapcast-host=localhost"]
+    return subprocess.Popen(args, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+
+
+def test_hook_to_control_script_end_to_end(runtime_dir):
+    ctrl = start_control(runtime_dir)
     try:
         assert json.loads(ctrl.stdout.readline()) == {"jsonrpc": "2.0", "method": "Plugin.Stream.Ready"}
 
         # Preload first, as librespot does ~30 s before the end of a track.
-        assert run_hook(tmp_path, {"PLAYER_EVENT": "preloading", "TRACK_ID": "next"}).returncode == 0
-        assert run_hook(tmp_path, TRACK_EVENT).returncode == 0
-        assert run_hook(tmp_path, {"PLAYER_EVENT": "playing", "POSITION_MS": "0"}).returncode == 0
+        assert run_hook(runtime_dir, {"PLAYER_EVENT": "preloading", "TRACK_ID": "next"}).returncode == 0
+        assert run_hook(runtime_dir, TRACK_EVENT).returncode == 0
+        assert run_hook(runtime_dir, {"PLAYER_EVENT": "playing", "POSITION_MS": "0"}).returncode == 0
 
         first = json.loads(ctrl.stdout.readline())
         assert first["method"] == "Plugin.Stream.Player.Properties"
@@ -204,13 +222,48 @@ def test_hook_to_control_script_end_to_end(tmp_path):
 
         ctrl.stdin.close()
         assert ctrl.wait(timeout=10) == 0
-        assert not (tmp_path / meta_librespot.SOCKET_NAME).exists()
+        assert not (runtime_dir / "snapcast-meta-librespot-SpotifyHD.sock").exists()
     finally:
         ctrl.kill()
         ctrl.wait()
 
 
-def test_hook_without_control_script_fails_with_a_message(tmp_path):
-    result = run_hook(tmp_path, {"PLAYER_EVENT": "playing", "POSITION_MS": "0"})
+def test_two_streams_get_their_own_events(runtime_dir):
+    # The reason for per-stream sockets: one snapserver, several librespots.
+    ctrls = {stream: start_control(runtime_dir, stream) for stream in ("Spotify-HTPC", "Spotify-Kitchen")}
+    try:
+        for ctrl in ctrls.values():
+            assert json.loads(ctrl.stdout.readline())["method"] == "Plugin.Stream.Ready"
+
+        assert run_hook(runtime_dir, TRACK_EVENT, "Spotify-HTPC").returncode == 0
+        assert run_hook(runtime_dir, {"PLAYER_EVENT": "playing", "POSITION_MS": "0"}, "Spotify-Kitchen").returncode == 0
+
+        htpc = json.loads(ctrls["Spotify-HTPC"].stdout.readline())["params"]
+        kitchen = json.loads(ctrls["Spotify-Kitchen"].stdout.readline())["params"]
+        assert (htpc["metadata"]["title"], htpc["playbackStatus"]) == ("Le tourbillon", "stopped")
+        assert ("metadata" not in kitchen, kitchen["playbackStatus"]) == (True, "playing")
+    finally:
+        for ctrl in ctrls.values():
+            ctrl.kill()
+            ctrl.wait()
+
+
+def test_hook_without_control_script_fails_with_a_message(runtime_dir):
+    result = run_hook(runtime_dir, {"PLAYER_EVENT": "playing", "POSITION_MS": "0"})
     assert result.returncode == 1
     assert "playing not delivered" in result.stderr
+
+
+def test_hook_without_stream_id_fails_with_a_message(runtime_dir):
+    env = {"PATH": os.environ["PATH"], "XDG_RUNTIME_DIR": str(runtime_dir), "PLAYER_EVENT": "playing"}
+    result = subprocess.run([sys.executable, str(SCRIPT)], env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 2
+    assert "playing not delivered" in result.stderr
+    assert "stream id" in result.stderr
+
+
+def test_control_script_requires_stream(runtime_dir):
+    env = {"PATH": os.environ["PATH"], "XDG_RUNTIME_DIR": str(runtime_dir)}
+    result = subprocess.run([sys.executable, str(SCRIPT)], env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 2
+    assert "--stream" in result.stderr
