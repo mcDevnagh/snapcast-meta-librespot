@@ -252,7 +252,7 @@ async def run_control(stream: str, mpris: bool) -> int:
             # Imported on demand: dbus-fast is only required with --mpris.
             import meta_librespot_mpris
 
-            view = await meta_librespot_mpris.export(player)
+            view = await meta_librespot_mpris.export(player, stream)
         loop.add_reader(events, on_event)
         loop.add_reader(stdin_fd, on_stdin)
         send({"jsonrpc": "2.0", "method": "Plugin.Stream.Ready"})

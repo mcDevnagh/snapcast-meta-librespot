@@ -16,10 +16,10 @@ from test_meta_librespot import SCRIPT, TRACK_EVENT, run_hook  # noqa: E402
 import meta_librespot_mpris  # noqa: E402
 from meta_librespot import Player  # noqa: E402
 from meta_librespot_mpris import (  # noqa: E402
-    BUS_NAME,
     NO_TRACK,
     ROOT_PATH,
     PlayerInterface,
+    bus_name,
     mpris_metadata,
     track_path,
 )
@@ -55,6 +55,22 @@ def test_track_metadata_mapping():
 
 def test_track_path_is_a_valid_object_path():
     assert track_path("spotify:episode:a-b.c") == "/org/mpris/MediaPlayer2/Track/spotify_episode_a_b_c"
+
+
+# --- bus name ----------------------------------------------------------
+@pytest.mark.parametrize(
+    ("stream", "expected"),
+    [
+        ("SpotifyHD", "org.mpris.MediaPlayer2.librespot.SpotifyHD"),
+        ("Spotify-HTPC", "org.mpris.MediaPlayer2.librespot.Spotify_HTPC"),
+        ("Air Play/2", "org.mpris.MediaPlayer2.librespot.Air_Play_2"),
+        # A bus name element must not start with a digit, nor be empty.
+        ("2nd", "org.mpris.MediaPlayer2.librespot._2nd"),
+        ("", "org.mpris.MediaPlayer2.librespot._"),
+    ],
+)
+def test_bus_name_is_one_instance_per_stream(stream, expected):
+    assert bus_name(stream) == expected
 
 
 # --- PlayerInterface ---------------------------------------------------
@@ -135,15 +151,27 @@ def bus_address():
         daemon.wait()
 
 
-async def call(bus: MessageBus, interface: str, member: str, signature: str = "", body: list | None = None) -> Message:
+async def call(
+    bus: MessageBus,
+    interface: str,
+    member: str,
+    signature: str = "",
+    body: list | None = None,
+    stream: str = "SpotifyHD",
+) -> Message:
     message = Message(
-        destination=BUS_NAME, path=ROOT_PATH, interface=interface, member=member, signature=signature, body=body or []
+        destination=bus_name(stream),
+        path=ROOT_PATH,
+        interface=interface,
+        member=member,
+        signature=signature,
+        body=body or [],
     )
     return await bus.call(message)
 
 
-def start_control(env: dict) -> subprocess.Popen:
-    args = [sys.executable, str(SCRIPT), "--stream=SpotifyHD", "--mpris"]
+def start_control(env: dict, stream: str = "SpotifyHD") -> subprocess.Popen:
+    args = [sys.executable, str(SCRIPT), f"--stream={stream}", "--mpris"]
     pipe = subprocess.PIPE
     return subprocess.Popen(args, env=env, stdin=pipe, stdout=pipe, stderr=pipe, text=True)
 
@@ -175,7 +203,7 @@ def test_mpris_end_to_end(runtime_dir, bus_address):
         assert props["Metadata"].value["xesam:artist"].value == ["Artist A", "Artist B"]
         assert 42_000_000 <= props["Position"].value < 52_000_000
         assert props["CanControl"].value is False
-        assert root.body[0]["Identity"].value == "librespot"
+        assert root.body[0]["Identity"].value == "librespot (SpotifyHD)"
         assert refused.message_type == MessageType.ERROR
         assert refused.error_name == "org.freedesktop.DBus.Error.NotSupported"
 
@@ -186,7 +214,48 @@ def test_mpris_end_to_end(runtime_dir, bus_address):
         ctrl.wait()
 
 
+def test_mpris_one_instance_per_stream(runtime_dir, bus_address):
+    # Two streams on one session bus: each owns its own name and only shows
+    # its own events.
+    env = {"PATH": os.environ["PATH"], "XDG_RUNTIME_DIR": str(runtime_dir), "DBUS_SESSION_BUS_ADDRESS": bus_address}
+    ctrls = {stream: start_control(env, stream) for stream in ("Spotify-HTPC", "Spotify-Kitchen")}
+    try:
+        for ctrl in ctrls.values():
+            assert json.loads(ctrl.stdout.readline())["method"] == "Plugin.Stream.Ready"
+        assert run_hook(runtime_dir, TRACK_EVENT, "Spotify-HTPC").returncode == 0
+        assert run_hook(runtime_dir, {"PLAYER_EVENT": "playing", "POSITION_MS": "0"}, "Spotify-Kitchen").returncode == 0
+        for ctrl in ctrls.values():
+            ctrl.stdout.readline()
+
+        async def read_players() -> dict[str, tuple[dict, dict]]:
+            bus = await MessageBus(bus_address=bus_address, bus_type=BusType.SESSION).connect()
+            get_all = "org.freedesktop.DBus.Properties", "GetAll", "s"
+            seen = {}
+            for stream in ctrls:
+                props = (await call(bus, *get_all, [PLAYER_IFACE], stream=stream)).body[0]
+                root = (await call(bus, *get_all, ["org.mpris.MediaPlayer2"], stream=stream)).body[0]
+                seen[stream] = props, root
+            bus.disconnect()
+            return seen
+
+        seen = asyncio.run(read_players())
+        htpc, htpc_root = seen["Spotify-HTPC"]
+        kitchen, kitchen_root = seen["Spotify-Kitchen"]
+        assert (htpc["PlaybackStatus"].value, htpc["Metadata"].value["xesam:title"].value) == (
+            "Stopped",
+            "Le tourbillon",
+        )
+        assert (kitchen["PlaybackStatus"].value, "xesam:title" in kitchen["Metadata"].value) == ("Playing", False)
+        assert htpc_root["Identity"].value == "librespot (Spotify-HTPC)"
+        assert kitchen_root["Identity"].value == "librespot (Spotify-Kitchen)"
+    finally:
+        for ctrl in ctrls.values():
+            ctrl.kill()
+            ctrl.wait()
+
+
 def test_mpris_name_already_owned_fails_before_ready(runtime_dir, bus_address):
+    # Only the same stream twice on one bus collides now.
     env = {"PATH": os.environ["PATH"], "XDG_RUNTIME_DIR": str(runtime_dir), "DBUS_SESSION_BUS_ADDRESS": bus_address}
     first = start_control(env)
     try:

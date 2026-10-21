@@ -18,6 +18,10 @@
 
 Read-only: librespot cannot be controlled from here, so every Can* flag is
 false and every method is refused.
+
+Each stream is its own MPRIS instance, as the MPRIS spec suggests for several
+instances of one player: the bus name ends with the snapcast stream id
+(org.mpris.MediaPlayer2.librespot.<stream id>), and Identity names the stream.
 """
 
 from __future__ import annotations
@@ -36,7 +40,7 @@ if TYPE_CHECKING:
 
 ROOT_PATH = "/org/mpris/MediaPlayer2"
 ROOT_IFACE = "org.mpris.MediaPlayer2"
-BUS_NAME = f"{ROOT_IFACE}.librespot"
+PLAYER_NAME = "librespot"
 IDENTITY = "librespot"
 NO_TRACK = f"{ROOT_PATH}/TrackList/NoTrack"
 NOT_SUPPORTED = "org.freedesktop.DBus.Error.NotSupported"
@@ -54,6 +58,16 @@ OPTIONAL_METADATA = {
 
 def refuse(name: str) -> DBusError:
     return DBusError(NOT_SUPPORTED, f"{name} is not supported: librespot cannot be controlled")
+
+
+def bus_name(stream: str) -> str:
+    """Well-known bus name for one stream's MPRIS instance. A bus name element
+    allows [A-Za-z0-9_-] and must not start with a digit; '-' is avoided too,
+    as the D-Bus spec discourages it."""
+    instance = re.sub(r"[^A-Za-z0-9_]", "_", stream)
+    if not instance or instance[0].isdigit():
+        instance = "_" + instance
+    return f"{ROOT_IFACE}.{PLAYER_NAME}.{instance}"
 
 
 def track_path(uri: str) -> str:
@@ -78,8 +92,9 @@ def mpris_metadata(md: dict | None) -> dict:
 
 
 class Root(ServiceInterface):
-    def __init__(self) -> None:
+    def __init__(self, stream: str) -> None:
         super().__init__(ROOT_IFACE)
+        self._identity = f"{IDENTITY} ({stream})"
 
     @method()
     def Raise(self):
@@ -103,7 +118,7 @@ class Root(ServiceInterface):
 
     @dbus_property(access=PropertyAccess.READ)
     def Identity(self) -> "s":
-        return IDENTITY
+        return self._identity
 
     @dbus_property(access=PropertyAccess.READ)
     def SupportedUriSchemes(self) -> "as":
@@ -247,14 +262,16 @@ class PlayerInterface(ServiceInterface):
         return False
 
 
-async def export(player: Player) -> PlayerInterface:
-    """Publish ``player`` on the session bus. Raises if the bus is
-    unreachable or the name is already owned."""
+async def export(player: Player, stream: str) -> PlayerInterface:
+    """Publish ``player`` on the session bus as the MPRIS instance of
+    ``stream``. Raises if the bus is unreachable or the name is already
+    owned."""
     bus = await MessageBus().connect()
     view = PlayerInterface(player)
-    bus.export(ROOT_PATH, Root())
+    bus.export(ROOT_PATH, Root(stream))
     bus.export(ROOT_PATH, view)
-    reply = await bus.request_name(BUS_NAME, NameFlag.DO_NOT_QUEUE)
+    name = bus_name(stream)
+    reply = await bus.request_name(name, NameFlag.DO_NOT_QUEUE)
     if reply != RequestNameReply.PRIMARY_OWNER:
-        raise RuntimeError(f"D-Bus name {BUS_NAME} is already owned by another process")
+        raise RuntimeError(f"D-Bus name {name} is already owned by another process")
     return view

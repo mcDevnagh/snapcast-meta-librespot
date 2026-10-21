@@ -73,21 +73,33 @@ source = process:///usr/bin/librespot?name=Spotify&sampleformat=44100:16:2&wd_ti
 ## MPRIS
 
 With `controlscriptparams=--mpris` appended to the source line, the control
-script also publishes a read-only MPRIS player on the session bus, as
-`org.mpris.MediaPlayer2.librespot`. It shows what plays on the server host
-(status, metadata, position, volume) to any MPRIS client.
+script also publishes a read-only MPRIS player on the session bus. It shows
+what plays on the server host (status, metadata, position, volume) to any
+MPRIS client.
+
+Each stream is its own MPRIS instance, as the MPRIS spec suggests for several
+instances of one player:
+
+- Bus name `org.mpris.MediaPlayer2.librespot.<stream id>`, e.g.
+  `org.mpris.MediaPlayer2.librespot.Spotify_HTPC`. Characters other than
+  letters, digits and `_` become `_`, and an id starting with a digit gets a
+  leading `_`.
+- `Identity` is `librespot (<stream id>)`, so media widgets can tell the
+  streams apart.
+- `playerctl -p librespot` matches every instance;
+  `playerctl -p librespot.Spotify_HTPC` picks one.
+
+Notes:
 
 - Session bus only: snapserver must run in a user session, so that the script
   inherits `DBUS_SESSION_BUS_ADDRESS`.
 - No control: every `Can*` property is false and every method is refused.
 - If the bus is unreachable, dbus-fast is missing or the name is already
-  owned, the script exits at startup and the stream gets no metadata at all.
+  owned (the same stream id twice on one bus), the script exits at startup
+  and the stream gets no metadata at all.
 
 ## Limitations
 
-- `--mpris` works for one stream per session bus: the bus name
-  `org.mpris.MediaPlayer2.librespot` is fixed, so a second stream with
-  `--mpris` exits at startup.
 - Read-only: librespot has no control API, so play, pause, next and previous
   are not available (`canControl` is false).
 - Metadata still leads the audio by snapserver's stream buffer (1 second by
